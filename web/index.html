@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>RTVA — Real-Time Video Analysis</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --border: #30363d; --text: #e6edf3;
+    --muted: #8b949e; --accent: #58a6ff; --good: #3fb950; --warn: #d29922;
+    --bad: #f85149; --provisional: #d29922; --confirmed: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, system-ui, sans-serif;
+         background: var(--bg); color: var(--text); }
+  header { padding: 12px 20px; border-bottom: 1px solid var(--border);
+           background: var(--panel); display: flex; gap: 12px; align-items: center; }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  header .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px;
+                  background: var(--accent); color: #000; }
+  main { display: grid; grid-template-columns: 1fr 380px; gap: 16px;
+         padding: 16px; height: calc(100vh - 56px); }
+  .left { display: flex; flex-direction: column; gap: 12px;
+          min-width: 0; }
+  .right { display: flex; flex-direction: column; gap: 12px;
+           min-width: 0; overflow: hidden; }
+  .panel { background: var(--panel); border: 1px solid var(--border);
+           border-radius: 8px; padding: 12px; }
+  .panel h2 { margin: 0 0 8px 0; font-size: 13px; color: var(--muted);
+              text-transform: uppercase; letter-spacing: 0.5px; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input, button, select { background: #0d1117; color: var(--text);
+                          border: 1px solid var(--border); border-radius: 4px;
+                          padding: 6px 10px; font-size: 13px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: #000; border-color: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #video { width: 100%; background: #000; border-radius: 4px;
+           aspect-ratio: 16/9; }
+  #narrative { max-height: 200px; overflow-y: auto; font-size: 13px;
+               line-height: 1.5; }
+  #narrative p { margin: 4px 0; padding: 6px 8px; border-radius: 4px;
+                 background: #0d1117; }
+  #narrative p time { color: var(--muted); font-size: 11px; margin-right: 8px; }
+  #events { overflow-y: auto; flex: 1; font-size: 13px; }
+  .event { padding: 8px 10px; margin: 4px 0; border-radius: 4px;
+           border-left: 3px solid var(--accent); background: #0d1117; }
+  .event.provisional { border-left-color: var(--provisional);
+                       background: rgba(210,153,34,0.05); }
+  .event.confirmed { border-left-color: var(--confirmed); }
+  .event .row1 { display: flex; gap: 8px; align-items: baseline; }
+  .event .type { font-size: 11px; text-transform: uppercase; color: var(--accent);
+                 letter-spacing: 0.5px; }
+  .event .time { font-size: 11px; color: var(--muted); margin-left: auto; }
+  .event .desc { margin: 4px 0; line-height: 1.4; }
+  .event .meta { font-size: 11px; color: var(--muted); }
+  #stats { font-size: 12px; line-height: 1.6; }
+  #stats .kv { display: flex; justify-content: space-between; }
+  #stats .kv span:first-child { color: var(--muted); }
+  #stats .kv.good span:last-child { color: var(--good); }
+  #stats .kv.warn span:last-child { color: var(--warn); }
+  #stats .kv.bad span:last-child { color: var(--bad); }
+  .status { font-size: 11px; padding: 2px 8px; border-radius: 10px; }
+  .status.connected { background: rgba(63,185,80,0.2); color: var(--good); }
+  .status.disconnected { background: rgba(248,81,73,0.2); color: var(--bad); }
+  .status.connecting { background: rgba(210,153,34,0.2); color: var(--warn); }
+</style>
+</head>
+<body>
+<header>
+  <h1>RTVA — Real-Time Video Analysis</h1>
+  <span id="status" class="status disconnected">disconnected</span>
+  <span style="flex:1"></span>
+  <span style="font-size:11px; color:var(--muted)">
+    MiniMax M3 · CPU gate · ~2-3s pre-alert · ~4-5s confirmed
+  </span>
+</header>
+<main>
+  <div class="left">
+    <div class="panel">
+      <h2>Source</h2>
+      <div class="controls">
+        <input id="src" value="/static/test.mp4" style="flex:1; min-width:200px"
+               placeholder="file path or RTSP/RTMP URL" />
+        <button id="start" class="primary">Start Session</button>
+        <button id="stop" disabled>Stop</button>
+      </div>
+      <video id="video" controls muted style="margin-top:12px"></video>
+    </div>
+    <div class="panel">
+      <h2>Live narrative</h2>
+      <div id="narrative"></div>
+    </div>
+  </div>
+  <div class="right">
+    <div class="panel">
+      <h2>Stats</h2>
+      <div id="stats">
+        <div class="kv"><span>frames received</span><span id="s-frames">0</span></div>
+        <div class="kv"><span>windows dispatched</span><span id="s-disp">0</span></div>
+        <div class="kv"><span>windows completed</span><span id="s-done">0</span></div>
+        <div class="kv"><span>windows failed</span><span id="s-fail">0</span></div>
+        <div class="kv"><span>events emitted</span><span id="s-events">0</span></div>
+        <div class="kv"><span>queue depth</span><span id="s-q">0</span></div>
+        <div class="kv"><span>backpressure</span><span id="s-bp">L0 normal</span></div>
+        <div class="kv"><span>latency p50</span><span id="s-p50">-</span></div>
+        <div class="kv"><span>latency p95</span><span id="s-p95">-</span></div>
+        <div class="kv good"><span>cache hits</span><span id="s-cache">0</span></div>
+        <div class="kv"><span>prompt tokens</span><span id="s-pt">0</span></div>
+        <div class="kv"><span>completion tokens</span><span id="s-ct">0</span></div>
+      </div>
+    </div>
+    <div class="panel" style="display:flex; flex-direction:column; flex:1; min-height:0;">
+      <h2>Key events (timeline)</h2>
+      <div id="events"></div>
+    </div>
+  </div>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const state = { sessionId: null, ws: null, events: new Map() };
+
+function setStatus(cls, txt) {
+  const el = $('#status'); el.className = 'status ' + cls; el.textContent = txt;
+}
+
+function fmtTime(t) {
+  if (typeof t !== 'number') return '';
+  const m = Math.floor(t / 60), s = (t % 60).toFixed(1);
+  return `${m}:${s.padStart(4, '0')}`;
+}
+
+function eventRow(msg, ev) {
+  const row = document.createElement('div');
+  row.className = 'event ' + (msg.includes('provisional') ? 'provisional'
+                              : msg.includes('updated') ? 'confirmed' : 'confirmed');
+  row.dataset.id = ev.event_id;
+  row.innerHTML = `
+    <div class="row1">
+      <span class="type">${ev.type}</span>
+      <span class="time">${fmtTime(ev.t_start)} - ${fmtTime(ev.t_end)}</span>
+    </div>
+    <div class="desc">${ev.description}</div>
+    <div class="meta">conf ${(ev.confidence ?? 0).toFixed(2)} · corr ${ev.corroboration ?? 1}</div>
+  `;
+  return row;
+}
+
+function handleEvent(msg) {
+  const ev = msg.event;
+  const key = ev.event_id;
+  if (msg.type === 'event.confirmed' || msg.type === 'event.updated') {
+    state.events.set(key, { msg, ev });
+  }
+  const container = $('#events');
+  let row = container.querySelector(`[data-id="${key}"]`);
+  if (!row) {
+    row = eventRow(msg.type, ev);
+    container.prepend(row);
+  } else {
+    row.replaceWith(eventRow(msg.type, ev));
+  }
+}
+
+function handleNarrative(msg) {
+  const p = document.createElement('p');
+  p.innerHTML = `<time>[${fmtTime(msg.t_start)}]</time> ${msg.text}`;
+  const c = $('#narrative'); c.prepend(p);
+  while (c.children.length > 50) c.removeChild(c.lastChild);
+}
+
+function handleStats(msg) {
+  $('#s-frames').textContent = msg.frames_received ?? 0;
+  $('#s-disp').textContent = msg.windows_dispatched ?? 0;
+  $('#s-done').textContent = msg.windows_completed ?? 0;
+  $('#s-fail').textContent = msg.windows_failed ?? 0;
+  $('#s-events').textContent = msg.events_emitted ?? 0;
+  $('#s-q').textContent = msg.queue_depth ?? 0;
+  $('#s-bp').textContent = `L${msg.backpressure_level ?? 0}`;
+  $('#s-p50').textContent = msg.latency_p50_ms ? `${msg.latency_p50_ms.toFixed(0)} ms` : '-';
+  $('#s-p95').textContent = msg.latency_p95_ms ? `${msg.latency_p95_ms.toFixed(0)} ms` : '-';
+  $('#s-cache').textContent = msg.cache_hits ?? 0;
+  $('#s-pt').textContent = msg.total_prompt_tokens ?? 0;
+  $('#s-ct').textContent = msg.total_completion_tokens ?? 0;
+}
+
+function handleBackpressure(msg) {
+  $('#s-bp').textContent = `L${msg.level} ${msg.label}`;
+  $('#s-bp').parentElement.classList.add('warn');
+  setTimeout(() => $('#s-bp').parentElement.classList.remove('warn'), 1500);
+}
+
+function handleError(msg) {
+  console.error('[rtva]', msg);
+}
+
+async function start() {
+  const src = $('#src').value.trim();
+  if (!src) return alert('enter a source');
+  setStatus('connecting', 'creating session');
+  try {
+    const resp = await fetch('/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: src }),
+    });
+    const data = await resp.json();
+    state.sessionId = data.session_id;
+    $('#video').src = src;
+    setStatus('connecting', 'connecting ws');
+    const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${data.observe_ws}`;
+    state.ws = new WebSocket(wsUrl);
+    state.ws.onopen = () => { setStatus('connected', 'connected'); $('#start').disabled = true; $('#stop').disabled = false; };
+    state.ws.onclose = () => { setStatus('disconnected', 'disconnected'); $('#start').disabled = false; $('#stop').disabled = true; };
+    state.ws.onerror = (e) => { console.error(e); setStatus('disconnected', 'error'); };
+    state.ws.onmessage = (e) => {
+      const m = JSON.parse(e.data);
+      if (m.type.startsWith('event.')) handleEvent(m);
+      else if (m.type === 'narrative') handleNarrative(m);
+      else if (m.type === 'stats') handleStats(m);
+      else if (m.type === 'backpressure') handleBackpressure(m);
+      else if (m.type === 'error') handleError(m);
+    };
+  } catch (e) {
+    console.error(e);
+    setStatus('disconnected', 'failed');
+  }
+}
+
+async function stop() {
+  if (state.sessionId) await fetch(`/sessions/${state.sessionId}`, { method: 'DELETE' });
+  if (state.ws) state.ws.close();
+  state.sessionId = null;
+}
+
+$('#start').addEventListener('click', start);
+$('#stop').addEventListener('click', stop);
+</script>
+</body>
+</html>

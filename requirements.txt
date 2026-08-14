@@ -1,0 +1,10 @@
+av>=11.0
+numpy>=1.26
+pillow>=10
+fastapi>=0.110
+uvicorn[standard]>=0.27
+httpx>=0.27
+pydantic>=2.5
+python-dotenv>=1.0
+python-multipart>=0.0.9
+kcp>=0.1.6      # Cython binding to ikcp.c (wire-compatible with kcp-go)
