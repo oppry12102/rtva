@@ -92,23 +92,68 @@ class Framer:
             self._expected = None
             try:
                 hdr = json.loads(msg)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                # Garbage message (e.g. JPEG bytes being misread as a JSON
+                # body) — drop and resync. Without this catch, the
+                # UnicodeDecodeError would propagate up, kill the peer's
+                # data path, and silently drop every subsequent frame.
+                log.warning("framer: dropping %d-byte non-JSON message",
+                            len(msg))
                 continue
-            payload_len = int(hdr.get("payload_len", 0))
-            if payload_len:
-                # next len-prefixed block is the payload
-                if len(self._buf) < LEN_FMT.size + payload_len:
-                    # wait for payload — push back
-                    self._buf = msg_with_len(msg) + self._buf  # crude restore
+            # Frame payloads: docs + Android clients send a wire
+            # `[u32 BE len][bytes]` after the JSON header but no
+            # `payload_len` field in the JSON. The Python kcp_sender.py
+            # (and the previous server expectation) carried the length
+            # inside the JSON as `payload_len`. Accept both.
+            if hdr.get("type") == "frame":
+                payload = self._consume_frame_payload(hdr)
+                if payload is None:
+                    # Need more data — restore the header back into the
+                    # buffer and wait. Use slice assignment so _buf stays
+                    # a bytearray (assigning from `+` makes it bytes, and
+                    # the next feed() would crash on _buf.extend).
+                    self._buf[:0] = msg_with_len(msg)
                     self._expected = None
-                    break
-                del self._buf[:LEN_FMT.size]
-                payload = bytes(self._buf[:payload_len])
-                del self._buf[:payload_len]
+                    return out
             else:
-                payload = b""
-            out.append((hdr, payload))
+                # Other message types carry no payload. (Historical
+                # `payload_len` JSON field is ignored.)
+                pass
+            out.append((hdr, payload if 'payload' in locals() else b""))
         return out
+
+    def _consume_frame_payload(self, hdr: dict) -> Optional[bytes]:
+        """Consume a frame's JPEG payload off the buffer.
+
+        Returns None if more bytes are needed; the caller pushes the
+        header back and waits.
+        """
+        # Form A: hdr.payload_len field is set (legacy Python sender).
+        explicit = int(hdr.get("payload_len", 0))
+        if explicit:
+            if len(self._buf) < LEN_FMT.size + explicit:
+                return None
+            del self._buf[:LEN_FMT.size]
+            payload = bytes(self._buf[:explicit])
+            del self._buf[:explicit]
+            return payload
+        # Form B: wire prefix only (Android client + docs).
+        if len(self._buf) < LEN_FMT.size:
+            return None
+        plen = LEN_FMT.unpack_from(self._buf, 0)[0]
+        if plen > 16 * 1024 * 1024:  # 16 MB sanity cap
+            log.warning("framer: implausible payload_len=%d, skipping", plen)
+            del self._buf[:LEN_FMT.size]
+            return b""
+        if plen == 0:
+            del self._buf[:LEN_FMT.size]
+            return b""
+        if len(self._buf) < LEN_FMT.size + plen:
+            return None
+        del self._buf[:LEN_FMT.size]
+        payload = bytes(self._buf[:plen])
+        del self._buf[:plen]
+        return payload
 
 
 def msg_with_len(data: bytes) -> bytes:
