@@ -91,6 +91,40 @@ behaviours worth handling.
 
 ---
 
+## 2026-08-14 — event broadcast + escalation threshold
+
+Two bugs found while running observe WS end-to-end with a synthetic high-
+motion source.
+
+### Event broadcast on observe WS — **fix** (was: silently dropped)
+
+- The `emit` closure in `SessionManager` looked up the session record by
+  `msg["session_id"]` — but `event.provisional`, `event.confirmed`,
+  `event.updated`, and `narrative` messages did **not** carry a
+  `session_id`. The lookup returned `None` and the message was silently
+  dropped, so observers and KCP peers never received them even though the
+  server-side `events_emitted` counter still incremented.
+- Fix: closure now captures the `record` directly and injects
+  `session_id` via `msg.setdefault(...)` before fan-out. All event and
+  narrative messages now reach `replay_buf`, observers, and the KCP
+  outbound channel.
+- **Client impact**: `event.*` and `narrative` messages now flow. Messages
+  now always carry `session_id`; clients that ignore unknown fields are
+  unaffected.
+
+### `escalations_dispatched` was effectively zero — **fix** (was: hardcoded)
+
+- `MotionGate.high_salience_motion` was hardcoded at `0.20` (mean-abs-diff
+  per pixel vs previous frame). Real-world content rarely exceeds this
+  threshold, so escalations almost never fired.
+- Fix: new config setting `escalate_motion_threshold` (env
+  `ESCALATE_MOTION_THRESHOLD`, default **0.20** — behaviour preserved).
+  `Pipeline` now reads the setting and constructs the gate accordingly.
+- **Client impact**: none unless the operator lowers the env. Recommended
+  starting point for high-motion scenes: `0.05`.
+
+---
+
 ## Historical
 
 The v1 API was introduced in commit `97b6d14`. This is the first CHANGELOG

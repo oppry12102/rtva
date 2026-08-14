@@ -92,6 +92,13 @@ class Settings:
     # tolerance: drop when interval < (1/target_fps) * (1 - tolerance).
     ingest_fps_tolerance: float = field(default_factory=lambda: _env_float("INGEST_FPS_TOLERANCE", 0.10))
 
+    # Escalation gate — frame-level motion signal that triggers a thinking-enabled
+    # M3 re-analysis. Range 0..1 (mean-abs-diff vs previous frame, normalized).
+    # Lower = more escalations. Default 0.20 matches the previous hardcoded value.
+    escalate_motion_threshold: float = field(
+        default_factory=lambda: _env_float("ESCALATE_MOTION_THRESHOLD", 0.20)
+    )
+
     # Session-create rate limit (per-token token bucket). capacity = burst size,
     # refill_per_sec ≈ 1 session per (1/refill) seconds in steady state.
     session_bucket_capacity: int = field(default_factory=lambda: _env_int("SESSION_BUCKET_CAPACITY", 3))

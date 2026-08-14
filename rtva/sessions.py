@@ -61,9 +61,12 @@ class SessionManager:
         options = options or {}
 
         async def emit(msg: dict) -> None:
-            record = self._sessions.get(msg.get("session_id", ""))
-            if not record:
-                return
+            # Capture the session record directly in the closure (was looked up
+            # via msg['session_id'] — which several message types never set, so
+            # event.* / narrative were silently dropped before reaching any WS).
+            # Inject session_id so observers / KCP peers / replay buffer can
+            # correlate. setdefault keeps any session_id the pipeline already set.
+            msg.setdefault("session_id", record.pipeline.session_id)
             record.replay_buf.append(msg)
             text = json.dumps(msg, default=str)
             dead = []
