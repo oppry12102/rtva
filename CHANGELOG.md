@@ -125,6 +125,41 @@ motion source.
 
 ---
 
+## 2026-08-14 — Chinese narration in `event.*` / `narrative` — **fix** (was: English)
+
+The video-analysis output was hardcoded English regardless of the caller's
+language. Two related defects in the prompt wiring:
+
+1. `prompts.SYSTEM_PROMPT` was a single English constant. The pipeline read
+   `options["language"]` and only echoed it in `session.started` — it never
+   reached the LLM.
+2. `Event.provisional_from_gate` hardcoded `description="significant change"`
+   in English, which the LLM echoed back when there was nothing more
+   specific to say.
+
+Fix:
+
+- `prompts.build_system_prompt(language)` returns a `zh` or `en` system
+  prompt. Chinese variant instructs the model to write `narrative` and
+  event `description` in Simplified Chinese; type enum values
+  (`action` / `scene_change` / `object_appear` / `object_disappear` /
+  `anomaly` / `transition`) stay English (canonical, shared with
+  `_MERGEABLE_TYPES` and downstream client routing).
+- `Pipeline.__post_init__` resolves `self.language` from
+  `options.get("language", "zh")` once and stores the resulting
+  `self.system_prompt`. The system prompt is the prefix that hits
+  MiniMax's server-side prompt cache, so it must be stable for the
+  lifetime of a session — never re-resolved per window.
+- `Event.provisional_from_gate(..., *, language="zh")` now localises the
+  fallback reason (`"显著变化"` for `zh`, `"significant change"` for `en`).
+
+**Client impact**: any client that was passing `"language"` in `options` and
+seeing English now sees the requested language. Default remains `"zh"`
+(the operator-requested language). Type-based routing on the client side
+is unaffected — type values are still the six English enums.
+
+---
+
 ## Historical
 
 The v1 API was introduced in commit `97b6d14`. This is the first CHANGELOG

@@ -28,7 +28,7 @@ from .gate import MotionGate
 from .llm import M3Client, encode_jpeg
 from .memory import StreamingMemory
 from .prompts import (
-    SYSTEM_PROMPT,
+    build_system_prompt,
     build_user_message,
     build_escalation_user_message,
 )
@@ -142,6 +142,11 @@ class Pipeline:
             self.frame_source = PyAVSource(self.source_url,
                                            target_fps=self.sched.target_fps)
         self.stats = Stats(session_id=self.session_id, started_at=self.started_at)
+        # Resolve the narration language once. The system prompt is the prefix
+        # that hits MiniMax's server-side prompt cache, so it must be stable
+        # for the lifetime of the session — never mutate after construction.
+        self.language: str = (self.options or {}).get("language", "zh")
+        self.system_prompt: str = build_system_prompt(self.language)
         self.client = M3Client()
 
     async def run(self) -> None:
@@ -270,7 +275,7 @@ class Pipeline:
                 fast_pass_summary="(see recent narrative lines)", offsets=offsets,
             )
             result = await self.client.analyze_window(
-                SYSTEM_PROMPT, msg, frames_b64, escalate=True,
+                self.system_prompt, msg, frames_b64, escalate=True,
             )
             # patch: re-emit narrative only (events already shipped via fast pass)
             if result.narrative:
@@ -287,7 +292,7 @@ class Pipeline:
 
     async def _on_gate_fire(self, sig) -> None:
         # provisional event: client sees something happened RIGHT NOW
-        ev = Event.provisional_from_gate(t=sig.t, reason="significant change")
+        ev = Event.provisional_from_gate(t=sig.t, language=self.language)
         self.mem.ingest_new_events([ev])
         await self._emit({"type": "event.provisional", "event": ev.to_dict()})
         # escalation: if the gate flagged HIGH salience, queue an async
@@ -334,7 +339,7 @@ class Pipeline:
                                           self.mem.scene_summary,
                                           offsets))
                 t0 = time.monotonic()
-                result = await self.client.analyze_window(SYSTEM_PROMPT, msg, frames_b64,
+                result = await self.client.analyze_window(self.system_prompt, msg, frames_b64,
                                                           escalate=escalate)
                 dt = time.monotonic() - t0
                 self.stats.record_latency(dt)

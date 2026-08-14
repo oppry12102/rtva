@@ -32,7 +32,14 @@ class Event:
     provisional: bool = False     # True if this came from the CPU gate (not yet LLM-confirmed)
 
     @classmethod
-    def provisional_from_gate(cls, t: float, reason: str = "significant change") -> "Event":
+    def provisional_from_gate(cls, t: float, reason: str | None = None,
+                              *, language: str = "zh") -> "Event":
+        # Default placeholder text, localised by language. The LLM normally
+        # overwrites this with a concrete description on the next pass;
+        # for streams with no fast-pass follow-up, the placeholder must still
+        # be in the narration language so Chinese streams don't leak English.
+        if reason is None:
+            reason = "显著变化" if language == "zh" else "significant change"
         now = time.time()
         return cls(
             event_id=str(uuid.uuid4()),
