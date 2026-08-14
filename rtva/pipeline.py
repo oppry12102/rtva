@@ -135,6 +135,24 @@ class Pipeline:
     _last_escalation_at: float = 0.0
     _escalation_in_flight: bool = False
 
+    def _track_task(self, coro) -> asyncio.Task:
+        """Spawn a background coroutine and track it so `stop()` / `run()`
+        can cancel and drain it before tearing down `M3Client`. Without this,
+        fire-and-forget `_safe_dispatch` / `_escalate` tasks outlive the
+        client and crash with `'NoneType' object has no attribute 'post'`
+        once `__aexit__` nulls `self.client._client`."""
+        t = asyncio.create_task(coro)
+        self._tasks.append(t)
+
+        def _drop(_):
+            try:
+                self._tasks.remove(t)
+            except ValueError:
+                pass
+
+        t.add_done_callback(_drop)
+        return t
+
     def __post_init__(self) -> None:
         if self.frame_source is None:
             if not self.source_url:
@@ -162,11 +180,20 @@ class Pipeline:
             self._tasks = [consumer, cadencer, stats_task]
             await consumer
             self._stop.set()
-            for t in (cadencer, stats_task):
-                t.cancel()
+            # Cancel and DRAIN every tracked task before __aexit__.
+            # Without the gather(), in-flight `_safe_dispatch` / `_escalate`
+            # tasks outlive the client and crash with AttributeError when
+            # they try to POST after `self.client._client` is nulled.
+            for t in list(self._tasks):
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+            self._tasks.clear()
         finally:
             await self.client.__aexit__()
-            await self._emit({"type": "session.ended", "session_id": self.session_id})
+            await self._emit({"type": "session.ended",
+                              "session_id": self.session_id,
+                              **self.stats.to_dict()})
 
     async def stop(self) -> None:
         self._stop.set()
@@ -222,7 +249,7 @@ class Pipeline:
                     break
                 self.stats.windows_dispatched += 1
                 self.stats.queue_depth = self.pool.in_flight
-                asyncio.create_task(self._safe_dispatch(window_id, t_start, t_end, lvl))
+                self._track_task(self._safe_dispatch(window_id, t_start, t_end, lvl))
                 self.sched._next_dispatch_t = now + 1.0 / lvl.window_hz
         except asyncio.CancelledError:
             return
@@ -298,7 +325,7 @@ class Pipeline:
         # escalation: if the gate flagged HIGH salience, queue an async
         # thinking-enabled M3 re-analysis of the same window for richer output.
         if sig.high_salience:
-            asyncio.create_task(self._escalate(sig.t))
+            self._track_task(self._escalate(sig.t))
 
     async def _safe_dispatch(self, window_id: int, t_start: float, t_end: float,
                               lvl: BackpressureLevel) -> None:
