@@ -47,6 +47,8 @@ class Stats:
     session_id: str
     started_at: float
     frames_received: int = 0
+    frames_dropped_fps: int = 0
+    frames_dropped_queue: int = 0
     windows_dispatched: int = 0
     windows_completed: int = 0
     windows_failed: int = 0
@@ -170,11 +172,21 @@ class Pipeline:
     # --- loops --------------------------------------------------------------
 
     async def _consume(self) -> None:
+        # Server-side fps cap: drop frames closer than (1/target_fps)*(1-tolerance).
+        # Uses pts (client wall clock) so jitter on the wire doesn't gate the cap.
+        target_fps = max(1, get_settings().target_fps)
+        tolerance = max(0.0, min(0.9, get_settings().ingest_fps_tolerance))
+        min_interval = (1.0 / target_fps) * (1.0 - tolerance)
+        last_kept_pts: float = 0.0
         try:
             async for vf in self.frame_source.frames():
                 if self._stop.is_set():
                     break
                 self.stats.frames_received += 1
+                if vf.pts - last_kept_pts < min_interval:
+                    self.stats.frames_dropped_fps += 1
+                    continue
+                last_kept_pts = vf.pts
                 self.ring.push(vf.pts, vf.rgb)
                 # gate evaluation
                 sig = self.gate.update(vf.rgb, t=vf.pts)

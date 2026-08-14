@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import struct
+import time
 from io import BytesIO
 from typing import AsyncIterator
 
@@ -38,6 +39,7 @@ class WSIngestor(FrameSource):
         self._stop = asyncio.Event()
         self._peer: tuple[str, int] | None = None
         self._frames_in: int = 0
+        self._last_t: float = time.monotonic()
 
     # ----- driver API (called by the WS endpoint) -----
 
@@ -54,6 +56,7 @@ class WSIngestor(FrameSource):
         rgb = await asyncio.to_thread(self._decode_jpeg, jpeg)
         item = VideoFrame(rgb=rgb, pts=pts_ms / 1000.0, wall=asyncio.get_event_loop().time())
         self._frames_in += 1
+        self._last_t = time.monotonic()
         try:
             self._q.put_nowait(item)
         except asyncio.QueueFull:
@@ -93,3 +96,8 @@ class WSIngestor(FrameSource):
     @property
     def frames_received(self) -> int:
         return self._frames_in
+
+    @property
+    def idle_seconds(self) -> float:
+        """Seconds since the last successfully decoded frame arrived."""
+        return time.monotonic() - self._last_t

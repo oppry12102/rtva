@@ -35,6 +35,7 @@ class KcpIngestor(FrameSource):
         self._stop = asyncio.Event()
         self._peer: Any = None  # KcpPeer; set via bind_peer
         self._frames_in = 0
+        self._last_t: float = time.monotonic()
 
     # ----- ingest -----
 
@@ -44,6 +45,7 @@ class KcpIngestor(FrameSource):
         item = VideoFrame(rgb=rgb, pts=pts_ms / 1000.0,
                           wall=asyncio.get_event_loop().time())
         self._frames_in += 1
+        self._last_t = time.monotonic()
         try:
             self._q.put_nowait(item)
         except asyncio.QueueFull:
@@ -92,3 +94,8 @@ class KcpIngestor(FrameSource):
     @property
     def peer_bound(self) -> bool:
         return self._peer is not None
+
+    @property
+    def idle_seconds(self) -> float:
+        """Seconds since the last frame arrived (used by the session reaper)."""
+        return time.monotonic() - self._last_t

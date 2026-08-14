@@ -19,16 +19,39 @@ from fastapi import (APIRouter, Depends, File, Form, HTTPException, Request,
                      UploadFile, WebSocket, WebSocketDisconnect)
 from fastapi.responses import JSONResponse
 
+import asyncio
+
 from .auth import (BYPASS_TOKEN, SCOPES, TokenRecord, TokenStore,
                    generate_token, get_store, has_scope, verify_bearer)
 from .config import get_settings
 from .ingest_http import HttpPostIngestor
 from .ingest_kcp import KcpIngestor
 from .ingest_ws import WSIngestor
+from .rate_limit import TokenBucket
 from .sessions import manager
 
 
 router = APIRouter(prefix="/v1", tags=["v1"])
+
+
+# --- Per-token session-create rate limit ------------------------------------
+# A simple token bucket per token label, lazily created. Buckets are process-
+# local; under multi-worker uvicorn each worker has its own dict. That's
+# acceptable here — the goal is "throttle noisy clients", not strict global QoS.
+_session_buckets: dict[str, TokenBucket] = {}
+_session_buckets_lock = asyncio.Lock()
+
+
+async def _acquire_session_slot(label: str) -> bool:
+    """Returns False if the caller has been rate-limited out of creating a session."""
+    s = get_settings()
+    async with _session_buckets_lock:
+        b = _session_buckets.get(label)
+        if b is None:
+            b = TokenBucket(capacity=s.session_bucket_capacity,
+                            refill_per_sec=s.session_bucket_refill_per_sec)
+            _session_buckets[label] = b
+    return await b.acquire()
 
 
 # ============================================================================
@@ -98,7 +121,11 @@ def _ingest_url(channel: str, sid: str, token: str) -> dict:
             "type": "kcp",
             "host": "this-server.host",
             "port": s.kcp_port,
-            "conv": sid_to_u32(sid),
+            # Wire conv is fixed; the KCP server routes by `session_id` in the
+            # `hello` message (see docs/KCP_WIRE.md §4). `sid_to_u32(sid)` is
+            # kept as the documented optional per-session conv for clients that
+            # want it for firewall reasons, but the server still only accepts 1.
+            "conv": 1,
             "wire": "see docs/KCP_WIRE.md",
         }
     raise ValueError(f"unknown channel: {channel}")
@@ -135,6 +162,11 @@ async def create_stream(body: dict,
     Returns:
         session_id + ingest/observe URLs for every supported channel.
     """
+    # Rate limit per-token. Admin scope bypasses the cap.
+    if "admin" not in rec.scopes:
+        if not await _acquire_session_slot(rec.label):
+            raise HTTPException(429, "rate limit: too many sessions for this token")
+
     source = body.get("source", "external")
     channel = body.get("channel", "ws")
     options = body.get("options") or {}

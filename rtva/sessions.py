@@ -9,12 +9,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .config import get_settings
 from .frame_source import FrameSource
 from .pipeline import Pipeline
+
+
+log = logging.getLogger("rtva.sessions")
 
 
 @dataclass
@@ -32,6 +38,7 @@ class SessionManager:
     def __init__(self) -> None:
         self._sessions: dict[str, SessionRecord] = {}
         self._lock = asyncio.Lock()
+        self._reaper_task: Optional[asyncio.Task] = None
 
     # ----- create paths -----
 
@@ -113,6 +120,85 @@ class SessionManager:
 
     def all(self) -> list[SessionRecord]:
         return list(self._sessions.values())
+
+    # ----- reaper -----
+
+    async def start_reaper(self) -> None:
+        """Start the periodic zombie-session sweeper.
+
+        Wakes every `reaper_interval_s` and reaps sessions that:
+            A) never received a frame and have lived past
+               `session_never_started_timeout_s`, or
+            B) have no observers AND the ingestor has been idle past
+               `session_idle_timeout_s`.
+        """
+        if self._reaper_task is not None and not self._reaper_task.done():
+            return
+        self._reaper_task = asyncio.create_task(self._reaper_loop())
+        log.info("session reaper started")
+
+    async def stop_reaper(self) -> None:
+        if self._reaper_task is None:
+            return
+        self._reaper_task.cancel()
+        try:
+            await self._reaper_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        self._reaper_task = None
+        log.info("session reaper stopped")
+
+    async def _reaper_loop(self) -> None:
+        interval = max(0.5, get_settings().reaper_interval_s)
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                await self._sweep_once()
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                log.warning("reaper loop error: %r", exc)
+
+    async def _sweep_once(self) -> None:
+        s = get_settings()
+        never_started_limit = s.session_never_started_timeout_s
+        idle_limit = s.session_idle_timeout_s
+        now_wall = time.time()
+        victims: list[str] = []
+
+        async with self._lock:
+            snapshot = list(self._sessions.items())
+            for sid, rec in snapshot:
+                st = rec.pipeline.stats
+                uptime_s = now_wall - rec.pipeline.started_at
+                # Class A: never produced a frame.
+                if st.frames_received == 0 and uptime_s > never_started_limit:
+                    victims.append(sid)
+                    continue
+                # Class B: source went away (no observers + idle ingestor).
+                if not rec.observers and self._idle_seconds(rec) > idle_limit:
+                    victims.append(sid)
+
+        for sid in victims:
+            log.info("reaping session %s", sid[:8])
+            try:
+                await self.stop(sid)
+            except Exception as exc:
+                log.warning("reaper: stop(%s) failed: %r", sid[:8], exc)
+
+    @staticmethod
+    def _idle_seconds(rec: SessionRecord) -> float:
+        """Best-effort idle time. 0 if ingestor has no `idle_seconds`."""
+        ing = rec.ingestor
+        if ing is None:
+            return 0.0
+        get = getattr(ing, "idle_seconds", None)
+        if get is None:
+            return 0.0
+        try:
+            return float(get)
+        except Exception:
+            return 0.0
 
 
 # Module-level singleton, imported by both server and api_v1.

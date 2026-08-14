@@ -44,11 +44,14 @@ async def _start_kcp() -> None:
         await kcp_server.start_server()
     except Exception as exc:
         print(f"[server] KCP server failed to start: {exc!r}")
+    # Start the periodic session reaper (zombie-sweeper).
+    await manager.start_reaper()
 
 
 @app.on_event("shutdown")
 async def _stop_kcp() -> None:
     await kcp_server.stop_server()
+    await manager.stop_reaper()
 
 
 @app.get("/healthz")

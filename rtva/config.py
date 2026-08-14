@@ -88,6 +88,26 @@ class Settings:
         default_factory=lambda: os.environ.get("KCP_ENABLED", "true").lower() in ("1", "true", "yes")
     )
 
+    # Ingest rate cap (server-side, drops frames faster than target_fps).
+    # tolerance: drop when interval < (1/target_fps) * (1 - tolerance).
+    ingest_fps_tolerance: float = field(default_factory=lambda: _env_float("INGEST_FPS_TOLERANCE", 0.10))
+
+    # Session-create rate limit (per-token token bucket). capacity = burst size,
+    # refill_per_sec ≈ 1 session per (1/refill) seconds in steady state.
+    session_bucket_capacity: int = field(default_factory=lambda: _env_int("SESSION_BUCKET_CAPACITY", 3))
+    session_bucket_refill_per_sec: float = field(
+        default_factory=lambda: _env_float("SESSION_BUCKET_REFILL_PER_SEC", 0.1)
+    )
+
+    # Session reaper — sweeps zombies on a fixed interval.
+    reaper_interval_s: float = field(default_factory=lambda: _env_float("REAPER_INTERVAL_S", 5.0))
+    session_never_started_timeout_s: float = field(
+        default_factory=lambda: _env_float("SESSION_NEVER_STARTED_TIMEOUT_S", 30.0)
+    )
+    session_idle_timeout_s: float = field(
+        default_factory=lambda: _env_float("SESSION_IDLE_TIMEOUT_S", 60.0)
+    )
+
 
 _settings: Optional[Settings] = None
 
