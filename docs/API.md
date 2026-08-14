@@ -82,8 +82,16 @@ subsequent ingest and observe calls.
      │ ─── DELETE /v1/streams/sid ▶ │   stop
 ```
 
-Sessions are auto-deleted when the source closes or after `DELETE`. A session
-that receives no frames for ~10 s is also reaped (configurable).
+Sessions are auto-deleted when the source closes or after `DELETE`. A periodic
+reaper also removes zombies:
+
+- **never-started** — `frames_received == 0` past `SESSION_NEVER_STARTED_TIMEOUT_S`
+  (default **30 s**). Catches apps that crashed during setup.
+- **idle** — no observers AND ingestor idle (no frame for
+  `SESSION_IDLE_TIMEOUT_S`, default **60 s**) — the source has gone away.
+
+The reaper runs every `REAPER_INTERVAL_S` (default **5 s**). Tune any of the
+three via env vars on the server.
 
 ### Multi-channel selection
 
@@ -140,14 +148,19 @@ Response `200`:
 {
   "session_id": "1cddc885-d9ae-49a5-820e-305d2ac713c6",
   "channel":    "kcp",
-  "ingest":     { "type": "kcp", "host": "...", "port": 8096, "conv": 587855705,
+  "ingest":     { "type": "kcp", "host": "...", "port": 8096, "conv": 1,
                   "wire": "see docs/KCP_WIRE.md" },
   "observe":    { "type": "ws",  "url": "/v1/streams/<sid>/observe?token=rtva_..." },
   "ingest_alt": { "type": "ws",  "url": "/v1/streams/<sid>/ingest?token=rtva_..." }
 }
 ```
 
-Errors: `400` (bad source/channel), `401`, `403`.
+`ingest.conv` is always `1` — the server routes KCP sessions by the
+`session_id` inside the `hello` message (see **[KCP_WIRE.md §4](KCP_WIRE.md)**),
+not by wire conv. Clients should hardcode `1`.
+
+Errors: `400` (bad source/channel), `401`, `403`, `429` (token's session-create
+bucket empty — back off and retry; see §7).
 
 ### `GET /v1/streams` — list sessions visible to your token
 
@@ -240,6 +253,8 @@ WebSocket observe isn't reachable.
 ```json
 {
   "frames_received": 80,
+  "frames_dropped_fps": 12,        // server-side fps cap rejected
+  "frames_dropped_queue": 0,       // ingestor queue overflow
   "windows_dispatched": 3,
   "windows_completed": 2,
   "events_emitted": 1,
@@ -247,6 +262,7 @@ WebSocket observe isn't reachable.
   "cache_hits": 2,
   "queue_depth": 0,
   "backpressure_level": 0,
+  "uptime_s": 142.3,
   ...
 }
 ```
@@ -355,6 +371,7 @@ token and session id; the server rejects everything else with `bye`.
 | `403` | Token lacks required scope; or token not owner of session (and not admin) |
 | `404` | Session not found (or wrong channel for ingest) |
 | `409` | Session already stopped, or ingestor/channel mismatch |
+| `429` | Session-create rate limit — token's bucket empty. Retry after the bucket refills. `admin` scope bypasses. |
 | `5xx` | Pipeline failure (rare; details logged on server side) |
 
 ---
@@ -368,10 +385,18 @@ token and session id; the server rejects everything else with `bye`.
 | HTTP frame size | unbounded (multipart) | nginx/uvicorn limits |
 | Event replay buffer | 200 messages per session | `SessionRecord.replay_buf` |
 | Token lifetime | indefinite until `DELETE /v1/admin/tokens/<token>` | revoke-only |
+| Ingest fps cap | drops frames faster than `target_fps * (1 - INGEST_FPS_TOLERANCE)` (default 7.2 fps when `TARGET_FPS=8`, `INGEST_FPS_TOLERANCE=0.10`) | server-side, in `pipeline._consume` |
+| Session-create burst | `SESSION_BUCKET_CAPACITY` (default 3) per token | per-token `TokenBucket` in `rtva.rate_limit` |
+| Session-create steady state | `SESSION_BUCKET_REFILL_PER_SEC` (default 0.1, ≈ 1 / 10 s) | same bucket |
+| Reaper sweep interval | `REAPER_INTERVAL_S` (default 5 s) | `SessionManager._reaper_loop` |
+| Never-started reap | `SESSION_NEVER_STARTED_TIMEOUT_S` (default 30 s) | reaper class A |
+| Idle reap | `SESSION_IDLE_TIMEOUT_S` (default 60 s) | reaper class B |
 
 When the ingest queue fills, the server drops the oldest frame (latest-wins)
 and increments `backpressure_level` — clients can watch `/stats` to detect
-sustained pressure.
+sustained pressure. The fps cap is independent: it caps the steady-state rate
+of *kept* frames, regardless of how full the queue gets. Frames rejected by
+the cap show up as `frames_dropped_fps` in `/stats`.
 
 ---
 

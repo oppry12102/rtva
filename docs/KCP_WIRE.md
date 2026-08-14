@@ -191,6 +191,11 @@ RTVA's KCP server uses a **fixed wire conv id of `1`**. All sessions share
 the same UDP listener, and the `hello` message's `session_id` field is
 what routes frames to the right pipeline.
 
+The `POST /v1/streams` response field `ingest.conv` is **always `1`** —
+the server does the session lookup by `session_id` in the `hello`
+message, not by wire conv. Clients should hardcode `1` on the KCP
+socket and ignore the field's value.
+
 If you need per-session isolation at the KCP layer (some clients want it
 for firewall reasons), the wire conv can be set to the truncated u32 hash
 of the session id — see `sid_to_u32()` in `rtva/api_v1.py` — but the
