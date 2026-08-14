@@ -1,5 +1,3 @@
-# Changelog
-
 All notable changes to the RTVA public v1 API. The server is the source of
 truth; clients should consult this when upgrading.
 
@@ -157,6 +155,50 @@ Fix:
 seeing English now sees the requested language. Default remains `"zh"`
 (the operator-requested language). Type-based routing on the client side
 is unaffected — type values are still the six English enums.
+
+---
+
+## 2026-08-15 — KCP framer accepts Android wire format — **fix** (was: frames silently dropped)
+
+The KCP framer (`rtva/kcp_server.py::Framer`) had two compounding bugs that
+left `frames_received=0` for any client following `docs/KCP_WIRE.md`
+(including the Android app). The user-visible symptom: KCP-level ACKs
+worked (server responded to every packet), `session.started` fired, but
+no `event.*` / `narrative` ever arrived; observe WS reported
+`windows_dispatched=1` and `windows_completed=0` until the session
+idled out.
+
+1. **Wire-format mismatch**: the framer only honored the
+   `hdr.payload_len` JSON field. The Python `kcp_sender.py` sets that
+   field; the Android client (and the docs) don't. Android frames
+   therefore hit the `else: payload = b""` branch and the JPEG decode
+   failed silently.
+2. **Unhandled `UnicodeDecodeError`**: when the JPEG bytes were then
+   treated as the next JSON body, `json.loads` raised
+   `UnicodeDecodeError` (JPEG bytes aren't valid UTF-8). The framer
+   only caught `JSONDecodeError`, so the exception propagated up,
+   killed the peer's data path, and silently dropped every subsequent
+   frame. KCP-level ACKs were unaffected, hiding the failure.
+
+Fix:
+
+- Framer now treats `type=="frame"` as always carrying a wire-prefixed
+  payload. New `_consume_frame_payload` accepts both forms:
+    - **Form A** (Python `kcp_sender.py`): `hdr.payload_len` set +
+      matching wire `[u32 BE len][bytes]` prefix.
+    - **Form B** (Android + docs): wire prefix only, no JSON field.
+- `feed()` now catches `(json.JSONDecodeError, UnicodeDecodeError)` so
+  a single garbage message logs a warning and the framer resyncs
+  instead of killing the peer's data path.
+- Drive-by fix for a latent push-back bug
+  (`self._buf = msg_with_len(msg) + self._buf`) that would have
+  crashed the next `feed()` call with `AttributeError` if a frame
+  header arrived fragmented across packets.
+
+**Client impact**: Android KCP sessions now produce events end-to-end.
+Verified with `examples/kcp_sender.py` running in Form B
+(`payload_len` stripped) — full event flow including Chinese
+narratives, all the way through to the KCP outbound channel.
 
 ---
 
