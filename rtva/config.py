@@ -115,6 +115,12 @@ class Settings:
         default_factory=lambda: _env_float("SESSION_IDLE_TIMEOUT_S", 60.0)
     )
 
+    # Grace period after the source closes (consumer returns) before tearing
+    # down M3Client. Lets in-flight LLM calls finish — without this, ~50% of
+    # the last dispatched windows lose their results because their httpx
+    # request gets cancelled mid-flight. Set 0 to disable.
+    shutdown_grace_s: float = field(default_factory=lambda: _env_float("SHUTDOWN_GRACE_S", 3.0))
+
 
 _settings: Optional[Settings] = None
 

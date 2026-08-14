@@ -134,6 +134,10 @@ class Pipeline:
     _tasks: list[asyncio.Task] = field(default_factory=list)
     _last_escalation_at: float = 0.0
     _escalation_in_flight: bool = False
+    # Monotonic seq counter, incremented on every emit. Survives the lifetime
+    # of the Pipeline (and thus the session) so observers can sort messages
+    # by arrival order even when LLM calls complete out of order.
+    _emit_seq: int = 0
 
     def _track_task(self, coro) -> asyncio.Task:
         """Spawn a background coroutine and track it so `stop()` / `run()`
@@ -180,10 +184,15 @@ class Pipeline:
             self._tasks = [consumer, cadencer, stats_task]
             await consumer
             self._stop.set()
-            # Cancel and DRAIN every tracked task before __aexit__.
-            # Without the gather(), in-flight `_safe_dispatch` / `_escalate`
-            # tasks outlive the client and crash with AttributeError when
-            # they try to POST after `self.client._client` is nulled.
+            # Grace period: let in-flight `_safe_dispatch` / `_escalate`
+            # tasks finish naturally before tearing down M3Client. Without
+            # this, httpx requests mid-flight get cancelled and ~50% of the
+            # last dispatched windows lose their results. cadencer and
+            # stats_task exit on their own as soon as they see _stop; the
+            # remaining tracked tasks are the analysis ones we want to wait on.
+            grace_s = max(0.0, get_settings().shutdown_grace_s)
+            if grace_s > 0:
+                await self._wait_for_dispatch_tasks(timeout=grace_s)
             for t in list(self._tasks):
                 if not t.done():
                     t.cancel()
@@ -194,6 +203,28 @@ class Pipeline:
             await self._emit({"type": "session.ended",
                               "session_id": self.session_id,
                               **self.stats.to_dict()})
+
+    async def _wait_for_dispatch_tasks(self, timeout: float) -> None:
+        """Wait up to `timeout` seconds for tracked tasks to drain naturally.
+
+        Loops on `asyncio.wait(FIRST_COMPLETED)` so each completion shortens
+        the loop — handles N parallel in-flight calls correctly. Bails out
+        early if no pending tasks remain.
+        """
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        while True:
+            pending = [t for t in self._tasks if not t.done()]
+            if not pending:
+                return
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            try:
+                await asyncio.wait(pending, timeout=remaining,
+                                   return_when=asyncio.FIRST_COMPLETED)
+            except Exception:
+                return
 
     async def stop(self) -> None:
         self._stop.set()
@@ -440,6 +471,11 @@ class Pipeline:
         })
 
     async def _emit(self, msg: dict) -> None:
+        # Stamp a monotonic per-session seq so observers can sort by arrival
+        # order. LLM calls complete out of order; stream-time (msg.t_start) is
+        # for content semantics, seq is for ordering.
+        self._emit_seq += 1
+        msg.setdefault("seq", self._emit_seq)
         try:
             await self.emit(msg)
         except Exception:
